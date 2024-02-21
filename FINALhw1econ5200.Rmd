@@ -1,0 +1,316 @@
+---
+editor_options:
+  markdown:
+    wrap: 72
+output: pdf_document
+---
+
+------------------------------------------------------------------------
+
+title: "Econ5200_HW_FINAL" author: "aadit" date: "2024-02-19" output:
+html_document
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+install.packages('reticulate')
+library(reticulate)
+use_python('C:/Users/aadit/anaconda3/python.exe')
+```
+
+I have completed this assignment in Python but am knitting in RMD format
+for submission. I will also submit the .py file of my code and pdf of my
+outputs in case there are errors in running my code. I have built two
+models, an OLS and ridge regression, that use data from the American
+Housing Survey 2021 to predict a person's monthly income(encoded in the
+dataset as HINCP). First, I load in the required file, perform data
+cleaning, and return a pandas df. Each of my code chunks will represent
+one function.
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+import numpy as np
+from sklearn import linear_model
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import mean_squared_error
+import warnings
+def file_setup(filename, sel_vars, binary_vars, forced_binary_vars):
+    chunks = []
+    for chunk in pd.read_csv(filename, chunksize=1000):
+        # Processing each chunk
+        df = chunk.copy()  # Make a copy to avoid modifying the original chunk
+
+        # Perform necessary modifications
+        # Filtering binary values
+        for var in binary_vars:
+            df.loc[:, var] = df[var].apply(lambda x: clean_and_convert_to_int(x))
+            df.loc[df[var] == 'N', var] = 1
+            df.loc[df[var] != 1, var] = 0
+        categorical_cols = ['BLD','HHRACE','HHSPAN','HHGRAD']
+        for var in categorical_cols:
+            df.loc[:, var] = df[var].apply(lambda x: clean_and_convert_to_int(x))
+        
+        df['HINCP'] = np.where(df['HINCP'] < 1, 1, df['HINCP'])
+        df['HINCP_log'] = np.log(df['HINCP'])
+
+        # Create additional binary variables
+        df['detached'] = np.where(df['BLD'] == 2, 1, 0)
+        df['trailer'] = np.where(df['BLD'] == 1, 1, 0)
+        df['white'] = np.where(df['HHRACE'] == 1, 1, 0)
+        df['black'] = np.where(df['HHRACE'] == 2, 1, 0)
+        df['asian'] = np.where(df['HHRACE'] == 1, 1, 0)  # This line seems incorrect. It assigns 1 for 'asian' if 'HHRACE' is 1.
+        df['hispanic'] = np.where(df['HHSPAN'] == 1, 1, 0)
+        df['hs_grad'] = np.where((df['HHGRAD'] == 39) | (df['HHGRAD'] == 41), 1, 0)
+        df['bachelors'] = np.where(df['HHGRAD'] == 41, 1, 0)
+        df['grad_school'] = np.where(df['HHGRAD'].isin([45, 46, 47]), 1, 0)
+        
+        # Filter the DataFrame based on sel_vars
+        df = df[sel_vars]
+        
+        # Append the modified chunk to the list of chunks
+        chunks.append(df)
+        print('chunk')
+    result_df = pd.concat(chunks, ignore_index=True)
+    
+    return result_df
+```
+
+Here, I import the necessary packages and load in the dataset in chunks
+of 1000 rows each to reduce computational load on my laptop. For each
+chunk, I clean the data, including taking the log of our y variable,
+HINCP, to regularize the outliers on the low and high end of income. I
+also removed quotations around numbers and classified binary variables
+to be strictly 0/1. Additionally, some variables contained categorical
+information, eg. on race, that I extracted into their own binary
+variables. Finally, I exclude any columns not needed from the df to
+speed up the program and combine the chunks to return the full df. The
+next chunk contains the main function of my code to display the
+structure of my analysis:
+
+```{python}
+if __name__ == "__main__":
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        filename = 'ahs2021n.csv'
+        forced_binary_vars = ['detached', 'trailer', 'white', 'black', 'asian', 'hispanic', 'hs_grad', 'bachelors', 'grad_school']
+        #Lots of data is stored categorically, eg. BLD represents whether a house is detached
+        #but also number of units in an apartment, so i break them up into binaries in the data processing
+        #each needs to be encoded seperately, so they are handled apart from the binary vars
+        binary_vars = ['SOLAR','ADEQUACY','ROOFSAG','ROOFHOLE','NHQSCHOOL','NHQPCRIME','NHQSCRIME','FS']
+        sel_vars = ['HINCP_log','YRBUILT', 'BEDROOMS', 'HHMOVE','TOTROOMS','NUMPEOPLE','HHAGE',]
+        sel_vars = sel_vars + binary_vars + forced_binary_vars
+            
+        # Call the functions with the loaded DataFrame
+        df = file_setup(filename, sel_vars,binary_vars,forced_binary_vars)
+        summary_statistics(df)
+        ols_summary(df, sel_vars)
+        ridge = ridge(df,sel_vars)
+```
+
+My chosen variables are as follows: Y: HINCP_log. Log of monthly income
+of the household. Binary Variables:
+
+SOLAR: if the house has solar power ADEQUACY : if the house is fit to
+live in, generally
+
+ROOFSAG
+
+ROOFHOLE
+
+NHQSCHOOL: if the local school district was assesed as 'good' by the
+respondent
+
+NHQPCRIME: if the neighborhood has high amounts of petty crime
+
+NHQSCRIME: if the neighborhood has high amounts of serious crime
+
+FS: if the respondent is on food stamps
+
+detached: if the respondent's house is detached from their neighbors
+
+trailer: if the respondent lives in a prefab or trailer home
+
+hs_grad: if the respondent graduated high school
+
+bachelors: if the respondent graduate four years of college
+
+grad_school: if the respondent has a post-graduate degree
+
+Binary Variables corresponding to race:
+
+white
+
+black
+
+asian
+
+hispanic
+
+```{python}
+def clean_and_convert_to_int(s):
+    cleaned_string = s.strip("'")
+    return (int(cleaned_string.lstrip('0')) if cleaned_string != '0' else 0)
+```
+
+This function was used to remove leading quotes, zeroes, and whitespace.
+
+```{python}
+def summary_statistics(df):
+    print('DESCRIPTIVE STATISTICS')
+    print(df.describe())
+    x_vars = [i for i in sel_vars if i != 'HINCP_log']
+# Assign x variables
+    x = df[x_vars]        
+    correlation_matrix = x.corr()
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt=".2f")
+    plt.title('Correlation Heatmap')
+    plt.show()
+```
+
+This function provides information on each of the column's descriptive
+statistics, including mean, standard deviation, count, and quartiles.
+Some small negative values in HINCP have been shifted to 0 to allow the
+log transformation. Additionally, it displays a plot that shows the
+correlation of each of the variables with each other, highlighting cases
+of co-linearity.
+
+```{python}
+def residuals_plot(fitted_values,residual,model_name):
+    plt.figure(figsize=(10, 6))
+    plt.scatter(fitted_values, residual, color='blue')
+    plt.title(f'Residuals vs Fitted, {model_name}')
+    plt.xlabel('Fitted values')
+    plt.ylabel('Residuals')
+    plt.axhline(y=0, color='r', linestyle='--')
+    plt.grid(True)
+    plt.show()
+```
+
+The above function plots the residuals of the model. It is used in the
+ols_summary and ridge functions
+
+```{python}
+
+def ols_summary(df, sel_vars):
+    
+    model_name = 'OLS'
+    x_vars = [i for i in sel_vars if i != 'HINCP_log']
+    # Assign x variables
+    X = df[x_vars]    
+    Y = df['HINCP_log']
+    df = df.rename(columns={'HINCP_log': 'y'})
+    # Adding constant to the independent variables
+    X = sm.add_constant(X)
+    
+    # Fit the OLS model
+    model = sm.OLS(Y, X).fit()
+    residual = model.resid
+    fitted_values = model.fittedvalues
+    # Print model summary
+    print(model.summary())
+    residuals_plot(fitted_values,residual,model_name)
+
+```
+
+The OLS model minimizes the Mean Squared Error of log(monthly income)
+and prints the summary statistics. X is the vector of all variables in
+sel_vars except for HINCP_log, and y is HINCP_log. The r\^2 value of
+.803 is strong, and the model's coefficients identify the strongest
+determinants of income. Being on Food Stamps, having a hole in your
+room, being black, or being hispanic, are strong negative determinants,
+while having solar power, more people in your home, going to graduate
+school, or having a detached home, are strong positive signals of
+income. A plot of the residuals is shown, which has some points showing
+unusual groupings in straight lines. This may be due to shifting values
+that were negative(no values were less that -6) to 0 in HINCP before
+conducting the log transformation. As is stated in the summary
+statistics, some variables had high collinearity, and this is exhibited
+the coeffcients of these variables. For example, the coefficient of
+ROOFSAG is slightly positive, but the coefficient of ROOFHOLE is more
+strongly negative; these columns likely are correlated with each other.
+I left these correlated pairs in intentionally to test the ability of
+the ridge regression to eliminiate variables with less effect.
+
+```{python}
+def ridge_summary(ridge_reg, grid_search,x_vars, x, y):
+    print('RIDGE MODEL SUMMARY')
+    # Print model coefficients
+    print("Model Coefficients:")
+    for var, coef in zip(x_vars, ridge_reg.coef_):
+        print(f"{var}: {coef}")
+    
+    # Print intercept
+    print("Intercept:", ridge_reg.intercept_)
+    
+    # Calculate predicted values
+    y_pred = ridge_reg.predict(x)
+    
+    # Calculate mean squared error
+    mse = mean_squared_error(y, y_pred)
+    print("Mean Squared Error (MSE):", mse)
+    
+    # Calculate Root Mean Squared Error (RMSE)
+    rmse = np.sqrt(mse)
+    print("Root Mean Squared Error (RMSE):", rmse)
+    
+    
+    # Calculate R-squared
+    r_squared = ridge_reg.score(x, y)
+    print("R-squared:", r_squared)
+    
+    # Print the best lambda value
+    print("Best Lambda (alpha):", grid_search.best_params_['alpha'])
+
+```
+
+The above chunk contains my chosen summary statistics for the ridge
+model. This must be done manually, as sci-kit-learn has no automatic
+summary function like statsmodels.
+
+```{python}
+def ridge(df, sel_vars):
+    model_name = 'Ridge'
+    df = df.rename(columns={'HINCP_log': 'y'})
+    y = df['y']
+    x_vars = [i for i in sel_vars if i != 'HINCP_log']
+    # Assign x variables
+    x = df[x_vars]
+
+    # Standardizing features made my model perform much worse
+    #scaler.fit_transform(x)
+    
+    # Define a range of lambda values to search
+    param_grid = {'alpha': [1e-07, 1e-06, 1e-05, 0.0001, 0.001, 0.01, 0.1, 1, 10, 100, 1000]}
+    
+    # Create Ridge regression model
+    ridge_reg = linear_model.Ridge()
+    
+    # Perform grid search with 10 fold cross-validation, minimizing MSE
+    grid_search = GridSearchCV(ridge_reg, param_grid, cv=10, scoring='neg_mean_squared_error')
+    grid_search.fit(x, y)
+    
+    # Get the best estimator from grid search
+    best_ridge_reg = grid_search.best_estimator_
+    
+    # Make predictions using the best estimator
+    y_pred = best_ridge_reg.predict(x)
+    
+    residuals = y - y_pred
+    residuals_plot(y_pred, residuals, model_name)
+    ridge_summary(best_ridge_reg, grid_search, x_vars, x,y)
+    return best_ridge_reg
+```
+
+In the ridge function, I define the X and Y variables the same as
+before. I did not standardize the data, as I encountered far worse
+results using automatic transformations than log transforming the y
+variable. Then, I create a list of powers of 10, and cross
+validate(10-fold) the model using grid_search, which identifies the
+lambda value that minimizes MSE at 10\^-7. Because lambda is very small,
+there is no model selection effect from the ridge regression. This could
+indicate that due to the large number of observations in relation to
+dimensions of x variables, the ridge regression's penalty is not needed
+to simplify the model and find the most important x variables. The r\^2
+values for both the ridge regression and the OLS model are .803.
